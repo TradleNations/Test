@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Family Tree</title>
+  <meta name="description" content="An interactive, visual family tree." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600&family=Inter:wght@400;500;600&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="css/styles.css" />
+</head>
+<body>
+  <header class="site-header">
+    <div class="header-inner">
+      <div class="header-titles">
+        <h1 id="familyTitle">Family Tree</h1>
+        <p id="familySubtitle" class="subtitle"></p>
+      </div>
+      <div class="header-tools">
+        <div class="search-wrap">
+          <input id="searchInput" type="search" placeholder="Search a name…" autocomplete="off" />
+        </div>
+        <div class="zoom-controls" role="group" aria-label="Zoom controls">
+          <button id="zoomOut" title="Zoom out" aria-label="Zoom out">&minus;</button>
+          <button id="zoomReset" title="Reset view" aria-label="Reset view">Fit</button>
+          <button id="zoomIn" title="Zoom in" aria-label="Zoom in">+</button>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <main class="stage" id="stage">
+    <svg class="connectors" id="connectors" aria-hidden="true"></svg>
+    <div class="tree-canvas" id="treeCanvas">
+      <div class="tree-root" id="treeRoot"></div>
+    </div>
+  </main>
+
+  <!-- Person details modal -->
+  <div class="modal-backdrop" id="modalBackdrop" hidden>
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modalName">
+      <button class="modal-close" id="modalClose" aria-label="Close">&times;</button>
+      <div class="modal-avatar" id="modalAvatar"></div>
+      <h2 id="modalName"></h2>
+      <p class="modal-dates" id="modalDates"></p>
+      <p class="modal-place" id="modalPlace"></p>
+      <p class="modal-notes" id="modalNotes"></p>
+    </div>
+  </div>
+
+  <footer class="site-footer">
+    <p>Built with the family tree template · <span id="personCount"></span> people</p>
+  </footer>
+
+  <script src="js/family-data.js"></script>
+  <script src="js/tree.js"></script>
+</body>
+</html>
