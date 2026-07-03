@@ -26,14 +26,59 @@ build step, no server, and no dependencies. Open it in a browser and it works.
 
 ## How saving works
 
-Your edits **save automatically in your browser, on the device you're using**
-(via `localStorage`). They are private to that browser.
+**Out of the box (no setup):** your edits **save automatically in your browser,
+on the device you're using** (via `localStorage`). They are private to that
+browser. Use **Export JSON** to download a backup you can keep or hand to
+someone else.
 
-To share changes with the rest of the family, or move them to another device,
-use **Export JSON** to download a backup file you can send on or keep safe.
+**Optional — one live copy the whole family edits together:** the code for this
+is already built in and switched off. Turn it on by connecting a free Firebase
+Realtime Database (see below). Once connected, everyone who opens the page reads
+and writes the *same* register, and each person's changes appear for everyone
+automatically.
 
-> Want *one shared copy the whole family can edit together, live*? That needs a
-> small hosted backend rather than per-device storage — it can be added later.
+## Turning on shared editing (Firebase — free)
+
+You only need to do this once. It takes about five minutes.
+
+1. Go to <https://console.firebase.google.com>, sign in, and **Add project**
+   (any name). You can skip Google Analytics.
+2. In the left menu open **Build → Realtime Database**, click **Create
+   Database**, pick a location, and start in **locked mode** (we set rules in
+   step 5).
+3. Open **Build → Authentication → Get started**, and under *Sign-in method*
+   enable **Anonymous**. (This lets the page connect without everyone needing a
+   password.)
+4. Click the **gear ⚙ → Project settings**. Scroll to *Your apps*, click the
+   web icon **`</>`**, register an app (any nickname), and copy the
+   `firebaseConfig` object it shows you.
+5. Back in **Realtime Database → Rules**, paste this and **Publish** — it lets
+   any signed-in visitor read and write the register:
+   ```json
+   { "rules": { "registerJSON": { ".read": "auth != null", ".write": "auth != null" } } }
+   ```
+6. Open **`index.html`**, find the `FIREBASE_CONFIG` block near the top of the
+   `<script>`, and replace `const FIREBASE_CONFIG = null;` with your copied
+   config object. Commit and push.
+
+That's it — reload the site and the banner will say *"Shared register."* The
+first person to load it seeds the shared copy from the transcription; after
+that, everyone shares one live register.
+
+> **Paste me your `firebaseConfig` and I'll wire it in for you** — the values in
+> it (apiKey, etc.) are *designed to be public* in a web page, so this is safe.
+
+### What the shared mode does and doesn't do
+
+- ✅ One live copy; edits sync to everyone within a second or two.
+- ✅ Still falls back to a private local copy if Firebase is ever unreachable.
+- ⚠️ **Access = anyone who has the page link can edit.** With the rules above,
+  that's fine for a register you share privately with the family. If you want to
+  restrict editing to named people (e.g. email sign-in with an allowlist), or a
+  view-only public page plus an editors-only link, ask and it can be added.
+- ⚠️ Saving writes the whole register at once, so simultaneous editors are
+  "last save wins." For a family tree that's rarely an issue, but avoid two
+  people editing the very same person at the very same moment.
 
 ## Viewing it locally
 

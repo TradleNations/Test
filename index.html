@@ -123,7 +123,7 @@
   <button id="relClear">Clear</button>
 </div>
 <main>
-  <div class="notice"><span class="tag">Your copy:</span> your edits save automatically in this browser, on this device. To share changes with the rest of the family, or move them to another device, use <b>Export JSON</b> to save a backup file you can send on or keep. (Want one shared copy the whole family can edit together, live? That can be added &mdash; just ask.)</div>
+  <div class="notice" id="notice"><span class="tag">Your copy:</span> your edits save automatically in this browser, on this device. Use <b>Export JSON</b> to keep a backup or hand changes to someone else. <em>Live shared editing for the whole family can be switched on &mdash; see the README.</em></div>
   <div id="stats" class="section-note"></div>
   <div class="scroller"><div class="columns" id="treeRoot"></div></div>
   <h2 class="section">People awaiting placement</h2>
@@ -152,6 +152,28 @@
 </div></div>
 <script>
 "use strict";
+
+/* ============================================================
+   SHARED EDITING (optional) — one live copy for the whole family
+   ------------------------------------------------------------
+   Leave FIREBASE_CONFIG as null and the register saves privately
+   in each person's own browser (per device).
+
+   To let everyone edit ONE live copy together, create a free
+   Firebase Realtime Database and paste its web-app config object
+   below. Step-by-step instructions are in the README.
+
+   Example:
+     const FIREBASE_CONFIG = {
+       apiKey: "AIza...",
+       authDomain: "your-app.firebaseapp.com",
+       databaseURL: "https://your-app-default-rtdb.firebaseio.com",
+       projectId: "your-app",
+       appId: "1:1234567890:web:abcdef"
+     };
+   ============================================================ */
+const FIREBASE_CONFIG = null;
+
 function buildSeed(){
   const people = {}; const unions = []; let uid = 0;
   function P(id,n,b,d,u,nt){ people[id]={n:n,b:b||"",d:d||"",u:!!u,nt:nt||""}; return id; }
@@ -686,7 +708,44 @@ const GEN_TERMS = ["Founders","Children","Grandchildren","Great-Grandchildren","
 function genColour(g){ return GEN_COLOURS[Math.min(g-1, GEN_COLOURS.length-1)] || "#888"; }
 function genTerm(g){ return GEN_TERMS[g-1] || ("Generation " + g); }
 
+/* ---- shared-editing sync layer (active only when FIREBASE_CONFIG is set) ---- */
+const SHARED = !!FIREBASE_CONFIG;
+let sharedRef = null, lastSyncedJSON = null;
+function loadScript(src){ return new Promise((res,rej)=>{
+  const s=document.createElement("script"); s.src=src; s.async=false;
+  s.onload=res; s.onerror=()=>rej(new Error("Could not load "+src)); document.head.appendChild(s); }); }
+function setNotice(html){ const n=$("notice"); if(n) n.innerHTML=html; }
+async function initShared(){
+  const base="https://www.gstatic.com/firebasejs/10.12.2/";
+  await loadScript(base+"firebase-app-compat.js");
+  await loadScript(base+"firebase-auth-compat.js");
+  await loadScript(base+"firebase-database-compat.js");
+  firebase.initializeApp(FIREBASE_CONFIG);
+  try{ await firebase.auth().signInAnonymously(); }catch(e){ /* anonymous auth off; continue if rules allow */ }
+  sharedRef = firebase.database().ref("registerJSON");
+  const snap = await sharedRef.once("value");
+  if(snap.exists() && typeof snap.val()==="string"){
+    DB = JSON.parse(snap.val()); lastSyncedJSON = snap.val();
+  }else{
+    DB = buildSeed(); lastSyncedJSON = JSON.stringify(DB); await sharedRef.set(lastSyncedJSON);
+  }
+  storageOK = true; setStatus("Live shared copy connected");
+  setNotice('<span class="tag">Shared register:</span> everyone with this page edits one live copy &mdash; changes appear for the whole family automatically. Use <b>Export JSON</b> for an occasional backup.');
+  // live updates from other people
+  sharedRef.on("value", (s)=>{
+    const val = s.val();
+    if(typeof val!=="string" || val===lastSyncedJSON) return;
+    lastSyncedJSON = val;
+    try{ DB = JSON.parse(val); }catch(e){ return; }
+    render(); setStatus("Updated from the family \u00b7 "+new Date().toLocaleTimeString());
+  });
+}
+
 async function loadDB(){
+  if(SHARED){
+    try{ await initShared(); return; }
+    catch(e){ storageOK=false; setStatus("Shared copy unavailable; showing a local copy"); }
+  }
   try{ const raw = localStorage.getItem(STORE_KEY);
     if(raw){ DB = JSON.parse(raw); storageOK = true; setStatus("Loaded your saved copy"); return; }
   }catch(e){}
@@ -696,8 +755,17 @@ async function loadDB(){
 }
 let saveTimer=null;
 function scheduleSave(){ setStatus("Saving\u2026"); clearTimeout(saveTimer);
-  saveTimer=setTimeout(()=>{ try{ localStorage.setItem(STORE_KEY, JSON.stringify(DB));
-    storageOK=true; setStatus("Saved to this device \u00b7 "+new Date().toLocaleTimeString()); }
+  saveTimer=setTimeout(()=>{ const json = JSON.stringify(DB);
+    if(SHARED && sharedRef){
+      lastSyncedJSON = json;
+      sharedRef.set(json)
+        .then(()=>setStatus("Saved for everyone \u00b7 "+new Date().toLocaleTimeString()))
+        .catch(()=>setStatus("Could not sync; use Export to keep changes"));
+      try{ localStorage.setItem(STORE_KEY, json); }catch(e){}
+      return;
+    }
+    try{ localStorage.setItem(STORE_KEY, json);
+      storageOK=true; setStatus("Saved to this device \u00b7 "+new Date().toLocaleTimeString()); }
     catch(e){ storageOK=false; setStatus("Could not save; use Export to keep changes"); } },700); }
 
 /* model helpers */
