@@ -31,11 +31,11 @@ on the device you're using** (via `localStorage`). They are private to that
 browser. Use **Export JSON** to download a backup you can keep or hand to
 someone else.
 
-**Optional — one live copy the whole family edits together:** the code for this
-is already built in and switched off. Turn it on by connecting a free Firebase
-Realtime Database (see below). Once connected, everyone who opens the page reads
-and writes the *same* register, and each person's changes appear for everyone
-automatically.
+**Optional — one live copy the family shares:** the code for this is already
+built in and switched off. Turn it on by connecting a free Firebase Realtime
+Database (see below). Once connected, **anyone with the link can view** the
+register, and **only the people you name can edit** it (they sign in with their
+email). Every editor's change appears for everyone automatically.
 
 ## Turning on shared editing (Firebase — free)
 
@@ -46,39 +46,59 @@ You only need to do this once. It takes about five minutes.
 2. In the left menu open **Build → Realtime Database**, click **Create
    Database**, pick a location, and start in **locked mode** (we set rules in
    step 5).
-3. Open **Build → Authentication → Get started**, and under *Sign-in method*
-   enable **Anonymous**. (This lets the page connect without everyone needing a
-   password.)
+3. Open **Build → Authentication → Get started → Sign-in method**, and enable
+   **Email/Password**. Inside that provider also switch on **Email link
+   (passwordless sign-in)**, then Save. (Editors sign in by clicking a one-time
+   link emailed to them — no passwords to manage.)
 4. Click the **gear ⚙ → Project settings**. Scroll to *Your apps*, click the
    web icon **`</>`**, register an app (any nickname), and copy the
    `firebaseConfig` object it shows you.
-5. Back in **Realtime Database → Rules**, paste this and **Publish** — it lets
-   any signed-in visitor read and write the register:
+5. Back in **Realtime Database → Rules**, paste the rules below and **Publish**.
+   They let *anyone* read, but only your listed editor emails write. Replace the
+   emails with your own (add one line per editor):
    ```json
-   { "rules": { "registerJSON": { ".read": "auth != null", ".write": "auth != null" } } }
+   {
+     "rules": {
+       "registerJSON": {
+         ".read": true,
+         ".write": "auth != null && (auth.token.email == 'you@example.com' || auth.token.email == 'aunt@example.com')"
+       }
+     }
+   }
    ```
-6. Open **`index.html`**, find the `FIREBASE_CONFIG` block near the top of the
-   `<script>`, and replace `const FIREBASE_CONFIG = null;` with your copied
-   config object. Commit and push.
+6. Open **`index.html`**, near the top of the `<script>` find the config block
+   and fill in **both** lines:
+   ```js
+   const FIREBASE_CONFIG = { …paste your config object here… };
+   const EDITOR_EMAILS = ["you@example.com", "aunt@example.com"];
+   ```
+   Use the **same emails** here as in the rules. Commit and push.
 
-That's it — reload the site and the banner will say *"Shared register."* The
-first person to load it seeds the shared copy from the transcription; after
-that, everyone shares one live register.
+That's it. Reload the site: the banner reads *"Shared register,"* and a **Sign
+in to edit** button appears. Approved editors click it, type their email, and
+open the link that arrives — then editing controls unlock for them. Everyone
+else sees a clean, read-only tree. The first approved editor to sign in
+publishes the starting register from the transcription.
 
-> **Paste me your `firebaseConfig` and I'll wire it in for you** — the values in
-> it (apiKey, etc.) are *designed to be public* in a web page, so this is safe.
+> **Paste me your `firebaseConfig` and the list of editor emails, and I'll wire
+> in both the code and the matching rules for you.** The config values (apiKey,
+> etc.) are *designed to be public* in a web page, so sharing them is safe.
 
-### What the shared mode does and doesn't do
+### What this mode does and doesn't do
 
-- ✅ One live copy; edits sync to everyone within a second or two.
-- ✅ Still falls back to a private local copy if Firebase is ever unreachable.
-- ⚠️ **Access = anyone who has the page link can edit.** With the rules above,
-  that's fine for a register you share privately with the family. If you want to
-  restrict editing to named people (e.g. email sign-in with an allowlist), or a
-  view-only public page plus an editors-only link, ask and it can be added.
+- ✅ Public view, editing limited to your named emails — enforced by Firebase
+  rules on the server, not just hidden in the page, so it can't be bypassed.
+- ✅ Editors' changes sync to everyone within a second or two.
+- ✅ If Firebase is ever unreachable, the site still shows the full tree and
+  falls back to a private local copy.
+- ⚠️ Adding or removing an editor means updating **both** `EDITOR_EMAILS` in
+  `index.html` **and** the emails in the database rules.
 - ⚠️ Saving writes the whole register at once, so simultaneous editors are
-  "last save wins." For a family tree that's rarely an issue, but avoid two
-  people editing the very same person at the very same moment.
+  "last save wins." Rarely an issue for a family tree, but avoid two people
+  editing the very same person at the very same moment.
+- ⚠️ The register is **publicly readable** by anyone with the link. If you'd
+  rather require sign-in even to *view*, change the rule `".read": true` to
+  `".read": "auth != null"` — ask if you want that variant.
 
 ## Viewing it locally
 

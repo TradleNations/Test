@@ -96,6 +96,12 @@
     .person{padding:5px 9px 6px;}
     .person .nm{font-size:14px;}
   }
+  /* View-only mode: hide edit controls when the visitor is not an approved editor */
+  body.viewonly #btnAdd, body.viewonly #btnReset,
+  body.viewonly #mSave, body.viewonly #mSpouse, body.viewonly #mChild,
+  body.viewonly #mParents, body.viewonly #mDelete{ display:none; }
+  body.viewonly .field input, body.viewonly .field textarea, body.viewonly .check{ opacity:.75; pointer-events:none; }
+  #btnAuth{ font-weight:600; }
 </style>
 </head>
 <body>
@@ -159,9 +165,13 @@
    Leave FIREBASE_CONFIG as null and the register saves privately
    in each person's own browser (per device).
 
-   To let everyone edit ONE live copy together, create a free
-   Firebase Realtime Database and paste its web-app config object
-   below. Step-by-step instructions are in the README.
+   To let the family edit ONE live copy together:
+     1. Create a free Firebase Realtime Database and paste its
+        web-app config into FIREBASE_CONFIG below.
+     2. List the emails allowed to EDIT in EDITOR_EMAILS below.
+   Anyone with the page can VIEW; only people whose email is in
+   EDITOR_EMAILS (after signing in by email) can make changes.
+   Step-by-step instructions are in the README.
 
    Example:
      const FIREBASE_CONFIG = {
@@ -171,8 +181,10 @@
        projectId: "your-app",
        appId: "1:1234567890:web:abcdef"
      };
+     const EDITOR_EMAILS = ["you@example.com", "aunt@example.com"];
    ============================================================ */
 const FIREBASE_CONFIG = null;
+const EDITOR_EMAILS = [];
 
 function buildSeed(){
   const people = {}; const unions = []; let uid = 0;
@@ -710,35 +722,95 @@ function genTerm(g){ return GEN_TERMS[g-1] || ("Generation " + g); }
 
 /* ---- shared-editing sync layer (active only when FIREBASE_CONFIG is set) ---- */
 const SHARED = !!FIREBASE_CONFIG;
-let sharedRef = null, lastSyncedJSON = null;
+const EDITOR_EMAILS_LC = (typeof EDITOR_EMAILS!=="undefined" ? EDITOR_EMAILS : []).map(e=>String(e).trim().toLowerCase());
+let sharedRef = null, lastSyncedJSON = null, sharedEmpty = false, authUser = null;
+
 function loadScript(src){ return new Promise((res,rej)=>{
   const s=document.createElement("script"); s.src=src; s.async=false;
   s.onload=res; s.onerror=()=>rej(new Error("Could not load "+src)); document.head.appendChild(s); }); }
 function setNotice(html){ const n=$("notice"); if(n) n.innerHTML=html; }
+
+/* who is allowed to edit */
+function isEditor(u){ return !!u && EDITOR_EMAILS_LC.indexOf(String(u.email||"").toLowerCase())!==-1; }
+function canEdit(){ return SHARED ? isEditor(authUser) : true; }
+function guard(fn){ return function(){ if(!canEdit()){ alert("Please sign in as an approved editor to make changes."); return; } return fn.apply(this, arguments); }; }
+
+/* sign-in UI + passwordless email-link flow */
+function makeAuthButton(){
+  if($("btnAuth")) return;
+  const btn=document.createElement("button"); btn.id="btnAuth"; btn.type="button";
+  btn.textContent="Sign in to edit"; btn.onclick=onAuthClick;
+  statusEl.parentNode.insertBefore(btn, statusEl);
+}
+function applyPerms(){
+  document.body.classList.toggle("viewonly", !canEdit());
+  const btn=$("btnAuth"); if(!btn) return;
+  if(!authUser){ btn.textContent="Sign in to edit"; btn.classList.add("primary"); }
+  else if(isEditor(authUser)){ btn.textContent="Sign out ("+authUser.email+")"; btn.classList.remove("primary"); }
+  else { btn.textContent="Not an editor \u00b7 sign out"; btn.classList.remove("primary"); }
+}
+function onAuthClick(){
+  if(authUser){ firebase.auth().signOut(); return; }
+  const email=prompt("Enter your email. We'll send a one-time sign-in link:");
+  if(!email) return;
+  const acs={ url: location.origin+location.pathname, handleCodeInApp:true };
+  firebase.auth().sendSignInLinkToEmail(email.trim(), acs)
+    .then(()=>{ try{ localStorage.setItem("emailForSignIn", email.trim()); }catch(e){}
+      alert("Check your email and click the link to finish signing in."); })
+    .catch(err=>alert("Could not send the link: "+err.message));
+}
+async function completeEmailLinkSignIn(){
+  if(!firebase.auth().isSignInWithEmailLink(location.href)) return;
+  let email=null; try{ email=localStorage.getItem("emailForSignIn"); }catch(e){}
+  if(!email) email=prompt("Confirm your email to finish signing in:");
+  if(!email) return;
+  try{ await firebase.auth().signInWithEmailLink(email.trim(), location.href);
+    try{ localStorage.removeItem("emailForSignIn"); }catch(e){}
+    history.replaceState(null, "", location.origin+location.pathname);
+  }catch(err){ alert("Sign-in link problem: "+err.message); }
+}
+
 async function initShared(){
   const base="https://www.gstatic.com/firebasejs/10.12.2/";
   await loadScript(base+"firebase-app-compat.js");
   await loadScript(base+"firebase-auth-compat.js");
   await loadScript(base+"firebase-database-compat.js");
   firebase.initializeApp(FIREBASE_CONFIG);
-  try{ await firebase.auth().signInAnonymously(); }catch(e){ /* anonymous auth off; continue if rules allow */ }
   sharedRef = firebase.database().ref("registerJSON");
+
+  // Anyone may read: load the current shared register, or fall back to the transcription.
   const snap = await sharedRef.once("value");
   if(snap.exists() && typeof snap.val()==="string"){
-    DB = JSON.parse(snap.val()); lastSyncedJSON = snap.val();
+    DB = JSON.parse(snap.val()); lastSyncedJSON = snap.val(); sharedEmpty=false;
   }else{
-    DB = buildSeed(); lastSyncedJSON = JSON.stringify(DB); await sharedRef.set(lastSyncedJSON);
+    DB = buildSeed(); lastSyncedJSON = null; sharedEmpty=true;   // not yet published to the shared copy
   }
-  storageOK = true; setStatus("Live shared copy connected");
-  setNotice('<span class="tag">Shared register:</span> everyone with this page edits one live copy &mdash; changes appear for the whole family automatically. Use <b>Export JSON</b> for an occasional backup.');
-  // live updates from other people
+  storageOK = true;
+
+  // Live updates whenever an editor saves.
   sharedRef.on("value", (s)=>{
     const val = s.val();
     if(typeof val!=="string" || val===lastSyncedJSON) return;
-    lastSyncedJSON = val;
+    lastSyncedJSON = val; sharedEmpty=false;
     try{ DB = JSON.parse(val); }catch(e){ return; }
     render(); setStatus("Updated from the family \u00b7 "+new Date().toLocaleTimeString());
   });
+
+  // Sign-in controls + auth state.
+  makeAuthButton(); applyPerms();
+  firebase.auth().onAuthStateChanged(async (u)=>{
+    authUser=u; applyPerms();
+    if(isEditor(u) && sharedEmpty){
+      // The first approved editor publishes the starting register to the shared copy.
+      const json=JSON.stringify(DB); lastSyncedJSON=json; sharedEmpty=false;
+      try{ await sharedRef.set(json); }catch(e){}
+    }
+    setStatus(!u ? "Viewing \u00b7 sign in to edit"
+      : isEditor(u) ? ("Editing as "+u.email) : ("Signed in (view only) \u00b7 "+u.email));
+  });
+  await completeEmailLinkSignIn();
+
+  setNotice('<span class="tag">Shared register:</span> anyone with this page can view. Only approved family editors (signed in by email) can make changes, and their edits appear for everyone automatically.');
 }
 
 async function loadDB(){
@@ -1019,17 +1091,19 @@ function removePerson(){ const p=DB.people[currentId];
 $("q").addEventListener("input",e=>{ searchTerm=e.target.value.trim().toLowerCase(); render(); });
 $("btnExpand").onclick=()=>{ colExpanded=99; render(); document.querySelector(".scroller").scrollLeft=0; };
 $("btnCollapse").onclick=()=>{ colExpanded=2; render(); };
-$("btnAdd").onclick=()=>{ const name=prompt("Full name of the person to add:"); if(!name) return;
+$("btnAdd").onclick=()=>{ if(!canEdit()){ alert("Please sign in as an approved editor to make changes."); return; }
+  const name=prompt("Full name of the person to add:"); if(!name) return;
   const id=newId(); DB.people[id]={n:name.trim(),b:prompt("Birth year (optional):")||"",d:"",u:false,nt:"Added "+new Date().toLocaleDateString()+". Use 'Set parents' to place in the tree."};
   scheduleSave(); render(); openModal(id); };
 $("btnExport").onclick=()=>{ const blob=new Blob([JSON.stringify(DB,null,2)],{type:"application/json"});
   const a=document.createElement("a"); a.href=URL.createObjectURL(blob);
   a.download="esdon-family-tree-"+new Date().toISOString().slice(0,10)+".json"; a.click(); URL.revokeObjectURL(a.href); };
-$("btnReset").onclick=()=>{ if(!confirm("Reset the register to the original transcription? All edits will be lost.")) return;
+$("btnReset").onclick=()=>{ if(!canEdit()){ alert("Please sign in as an approved editor to make changes."); return; }
+  if(!confirm("Reset the register to the original transcription? All edits will be lost.")) return;
   if(!confirm("This cannot be undone. Export a backup first if in doubt. Reset now?")) return;
   DB=buildSeed(); scheduleSave(); render(); };
-$("mSave").onclick=saveFields; $("mSpouse").onclick=addSpouse; $("mChild").onclick=addChild;
-$("mParents").onclick=setParents; $("mDelete").onclick=removePerson; $("mClose").onclick=closeModal;
+$("mSave").onclick=guard(saveFields); $("mSpouse").onclick=guard(addSpouse); $("mChild").onclick=guard(addChild);
+$("mParents").onclick=guard(setParents); $("mDelete").onclick=guard(removePerson); $("mClose").onclick=closeModal;
 $("overlay").addEventListener("click",e=>{ if(e.target===$("overlay")) closeModal(); });
 document.addEventListener("keydown",e=>{ if(e.key==="Escape"){ closeModal(); } });
 
