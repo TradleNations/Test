@@ -161,29 +161,26 @@
 
 /* ============================================================
    SHARED EDITING (optional) — one live copy for the whole family
+   Backend: Nhost (European, Postgres + GraphQL + Auth)
    ------------------------------------------------------------
-   Leave FIREBASE_CONFIG as null and the register saves privately
+   Leave NHOST_CONFIG as null and the register saves privately
    in each person's own browser (per device).
 
    To let the family edit ONE live copy together:
-     1. Create a free Firebase Realtime Database and paste its
-        web-app config into FIREBASE_CONFIG below.
-     2. List the emails allowed to EDIT in EDITOR_EMAILS below.
-   Anyone with the page can VIEW; only people whose email is in
-   EDITOR_EMAILS (after signing in by email) can make changes.
+     1. Create a free Nhost project, add the `register` table and
+        permissions (see the README), and enable magic-link email
+        sign-in.
+     2. Put your project's subdomain + region in NHOST_CONFIG below.
+     3. List the emails allowed to EDIT in EDITOR_EMAILS below, and
+        grant those users the "editor" role in Nhost (see README).
+   Anyone with the page can VIEW; only approved editors can change it.
    Step-by-step instructions are in the README.
 
    Example:
-     const FIREBASE_CONFIG = {
-       apiKey: "AIza...",
-       authDomain: "your-app.firebaseapp.com",
-       databaseURL: "https://your-app-default-rtdb.firebaseio.com",
-       projectId: "your-app",
-       appId: "1:1234567890:web:abcdef"
-     };
+     const NHOST_CONFIG = { subdomain: "abcxyz", region: "eu-central-1" };
      const EDITOR_EMAILS = ["you@example.com", "aunt@example.com"];
    ============================================================ */
-const FIREBASE_CONFIG = null;
+const NHOST_CONFIG = null;
 const EDITOR_EMAILS = [];
 
 function buildSeed(){
@@ -720,14 +717,13 @@ const GEN_TERMS = ["Founders","Children","Grandchildren","Great-Grandchildren","
 function genColour(g){ return GEN_COLOURS[Math.min(g-1, GEN_COLOURS.length-1)] || "#888"; }
 function genTerm(g){ return GEN_TERMS[g-1] || ("Generation " + g); }
 
-/* ---- shared-editing sync layer (active only when FIREBASE_CONFIG is set) ---- */
-const SHARED = !!FIREBASE_CONFIG;
+/* ---- shared-editing sync layer \u2014 Nhost (active only when NHOST_CONFIG is set) ---- */
+const SHARED = !!NHOST_CONFIG;
 const EDITOR_EMAILS_LC = (typeof EDITOR_EMAILS!=="undefined" ? EDITOR_EMAILS : []).map(e=>String(e).trim().toLowerCase());
-let sharedRef = null, lastSyncedJSON = null, sharedEmpty = false, authUser = null;
+let lastSyncedJSON = null, sharedEmpty = false, authUser = null;
+let nhToken = null, nhRefresh = null, pollTimer = null;
+const NH_REFRESH_KEY = "nhost_refresh_token";
 
-function loadScript(src){ return new Promise((res,rej)=>{
-  const s=document.createElement("script"); s.src=src; s.async=false;
-  s.onload=res; s.onerror=()=>rej(new Error("Could not load "+src)); document.head.appendChild(s); }); }
 function setNotice(html){ const n=$("notice"); if(n) n.innerHTML=html; }
 
 /* who is allowed to edit */
@@ -735,7 +731,63 @@ function isEditor(u){ return !!u && EDITOR_EMAILS_LC.indexOf(String(u.email||"")
 function canEdit(){ return SHARED ? isEditor(authUser) : true; }
 function guard(fn){ return function(){ if(!canEdit()){ alert("Please sign in as an approved editor to make changes."); return; } return fn.apply(this, arguments); }; }
 
-/* sign-in UI + passwordless email-link flow */
+/* ---- Nhost endpoints ---- */
+function nhAuthUrl(){ return "https://"+NHOST_CONFIG.subdomain+".auth."+NHOST_CONFIG.region+".nhost.run/v1"; }
+function nhGqlUrl(){ return "https://"+NHOST_CONFIG.subdomain+".graphql."+NHOST_CONFIG.region+".nhost.run/v1"; }
+
+/* GraphQL over HTTP; retries once after refreshing an expired token */
+async function gql(query, variables, _retried){
+  const headers={ "Content-Type":"application/json" };
+  if(nhToken) headers["Authorization"]="Bearer "+nhToken;
+  const res=await fetch(nhGqlUrl(), { method:"POST", headers, body:JSON.stringify({ query, variables }) });
+  if((res.status===401 || res.status===403) && nhRefresh && !_retried){
+    await nhExchange(nhRefresh); return gql(query, variables, true);
+  }
+  const json=await res.json();
+  if(json.errors){
+    if(!_retried && nhRefresh && /jwt|token|unauthor/i.test(JSON.stringify(json.errors))){
+      await nhExchange(nhRefresh); return gql(query, variables, true);
+    }
+    throw new Error(json.errors.map(e=>e.message).join("; "));
+  }
+  return json.data;
+}
+async function nhLoad(){
+  const d=await gql("query { register_by_pk(id: 1) { data } }");
+  return d && d.register_by_pk ? d.register_by_pk.data : null;
+}
+async function nhSave(obj){
+  await gql(
+    "mutation($d: jsonb!){ insert_register_one(object:{id:1, data:$d}, on_conflict:{constraint: register_pkey, update_columns: data}){ id } }",
+    { d: obj });
+}
+
+/* ---- Nhost auth: passwordless magic-link over the REST API ---- */
+async function nhSendMagicLink(email){
+  const res=await fetch(nhAuthUrl()+"/signin/passwordless/email", {
+    method:"POST", headers:{ "Content-Type":"application/json" },
+    body: JSON.stringify({ email, options:{ redirectTo: location.origin+location.pathname } }) });
+  if(!res.ok) throw new Error((await res.text())||("HTTP "+res.status));
+}
+async function nhExchange(refreshToken){
+  const res=await fetch(nhAuthUrl()+"/token", {
+    method:"POST", headers:{ "Content-Type":"application/json" },
+    body: JSON.stringify({ refreshToken }) });
+  if(!res.ok){ nhToken=null; nhRefresh=null; try{ localStorage.removeItem(NH_REFRESH_KEY); }catch(e){} throw new Error("token exchange failed"); }
+  const j=await res.json();
+  nhToken=j.accessToken; nhRefresh=j.refreshToken;
+  try{ localStorage.setItem(NH_REFRESH_KEY, nhRefresh); }catch(e){}
+  authUser=j.user||authUser;
+  return authUser;
+}
+/* Nhost returns to redirectTo with a refreshToken (in the query or the hash) */
+function extractRefreshToken(){
+  try{ const q=new URLSearchParams(location.search).get("refreshToken"); if(q) return q; }catch(e){}
+  try{ const h=new URLSearchParams(location.hash.replace(/^#/,"")).get("refreshToken"); if(h) return h; }catch(e){}
+  return null;
+}
+
+/* ---- sign-in UI ---- */
 function makeAuthButton(){
   if($("btnAuth")) return;
   const btn=document.createElement("button"); btn.id="btnAuth"; btn.type="button";
@@ -749,68 +801,59 @@ function applyPerms(){
   else if(isEditor(authUser)){ btn.textContent="Sign out ("+authUser.email+")"; btn.classList.remove("primary"); }
   else { btn.textContent="Not an editor \u00b7 sign out"; btn.classList.remove("primary"); }
 }
+function updateSharedStatus(){
+  setStatus(!authUser ? "Viewing \u00b7 sign in to edit"
+    : isEditor(authUser) ? ("Editing as "+authUser.email) : ("Signed in (view only) \u00b7 "+authUser.email));
+}
 function onAuthClick(){
-  if(authUser){ firebase.auth().signOut(); return; }
+  if(authUser){ // sign out
+    nhToken=null; nhRefresh=null; authUser=null;
+    try{ localStorage.removeItem(NH_REFRESH_KEY); }catch(e){}
+    applyPerms(); updateSharedStatus(); return;
+  }
   const email=prompt("Enter your email. We'll send a one-time sign-in link:");
   if(!email) return;
-  const acs={ url: location.origin+location.pathname, handleCodeInApp:true };
-  firebase.auth().sendSignInLinkToEmail(email.trim(), acs)
-    .then(()=>{ try{ localStorage.setItem("emailForSignIn", email.trim()); }catch(e){}
-      alert("Check your email and click the link to finish signing in."); })
+  nhSendMagicLink(email.trim())
+    .then(()=>alert("Check your email and click the link to finish signing in."))
     .catch(err=>alert("Could not send the link: "+err.message));
 }
-async function completeEmailLinkSignIn(){
-  if(!firebase.auth().isSignInWithEmailLink(location.href)) return;
-  let email=null; try{ email=localStorage.getItem("emailForSignIn"); }catch(e){}
-  if(!email) email=prompt("Confirm your email to finish signing in:");
-  if(!email) return;
-  try{ await firebase.auth().signInWithEmailLink(email.trim(), location.href);
-    try{ localStorage.removeItem("emailForSignIn"); }catch(e){}
-    history.replaceState(null, "", location.origin+location.pathname);
-  }catch(err){ alert("Sign-in link problem: "+err.message); }
+
+/* poll the shared copy so everyone sees others' edits */
+function startPolling(){
+  clearInterval(pollTimer);
+  pollTimer=setInterval(async()=>{
+    try{
+      const remote=await nhLoad(); if(!remote) return;
+      const json=JSON.stringify(remote);
+      if(json!==lastSyncedJSON){
+        lastSyncedJSON=json; sharedEmpty=false; DB=remote; render();
+        setStatus("Updated from the family \u00b7 "+new Date().toLocaleTimeString());
+      }
+    }catch(e){}
+  }, 7000);
 }
 
 async function initShared(){
-  const base="https://www.gstatic.com/firebasejs/10.12.2/";
-  await loadScript(base+"firebase-app-compat.js");
-  await loadScript(base+"firebase-auth-compat.js");
-  await loadScript(base+"firebase-database-compat.js");
-  firebase.initializeApp(FIREBASE_CONFIG);
-  sharedRef = firebase.database().ref("registerJSON");
+  // Restore a previous session, or complete a magic-link redirect.
+  try{ const rt=localStorage.getItem(NH_REFRESH_KEY); if(rt) await nhExchange(rt).catch(()=>{}); }catch(e){}
+  const rt2=extractRefreshToken();
+  if(rt2){ try{ await nhExchange(rt2); }catch(e){} history.replaceState(null, "", location.origin+location.pathname); }
 
   // Anyone may read: load the current shared register, or fall back to the transcription.
-  const snap = await sharedRef.once("value");
-  if(snap.exists() && typeof snap.val()==="string"){
-    DB = JSON.parse(snap.val()); lastSyncedJSON = snap.val(); sharedEmpty=false;
-  }else{
-    DB = buildSeed(); lastSyncedJSON = null; sharedEmpty=true;   // not yet published to the shared copy
-  }
-  storageOK = true;
+  let remote=null; try{ remote=await nhLoad(); }catch(e){}
+  if(remote){ DB=remote; lastSyncedJSON=JSON.stringify(remote); sharedEmpty=false; }
+  else { DB=buildSeed(); lastSyncedJSON=null; sharedEmpty=true; }
+  storageOK=true;
 
-  // Live updates whenever an editor saves.
-  sharedRef.on("value", (s)=>{
-    const val = s.val();
-    if(typeof val!=="string" || val===lastSyncedJSON) return;
-    lastSyncedJSON = val; sharedEmpty=false;
-    try{ DB = JSON.parse(val); }catch(e){ return; }
-    render(); setStatus("Updated from the family \u00b7 "+new Date().toLocaleTimeString());
-  });
-
-  // Sign-in controls + auth state.
   makeAuthButton(); applyPerms();
-  firebase.auth().onAuthStateChanged(async (u)=>{
-    authUser=u; applyPerms();
-    if(isEditor(u) && sharedEmpty){
-      // The first approved editor publishes the starting register to the shared copy.
-      const json=JSON.stringify(DB); lastSyncedJSON=json; sharedEmpty=false;
-      try{ await sharedRef.set(json); }catch(e){}
-    }
-    setStatus(!u ? "Viewing \u00b7 sign in to edit"
-      : isEditor(u) ? ("Editing as "+u.email) : ("Signed in (view only) \u00b7 "+u.email));
-  });
-  await completeEmailLinkSignIn();
 
-  setNotice('<span class="tag">Shared register:</span> anyone with this page can view. Only approved family editors (signed in by email) can make changes, and their edits appear for everyone automatically.');
+  // The first approved editor publishes the starting register.
+  if(canEdit() && sharedEmpty){
+    try{ await nhSave(DB); lastSyncedJSON=JSON.stringify(DB); sharedEmpty=false; }catch(e){}
+  }
+  updateSharedStatus();
+  startPolling();
+  setNotice('<span class="tag">Shared register:</span> anyone with this page can view. Only approved family editors (signed in by email) can make changes, and their edits appear for everyone within a few seconds.');
 }
 
 async function loadDB(){
@@ -828,9 +871,9 @@ async function loadDB(){
 let saveTimer=null;
 function scheduleSave(){ setStatus("Saving\u2026"); clearTimeout(saveTimer);
   saveTimer=setTimeout(()=>{ const json = JSON.stringify(DB);
-    if(SHARED && sharedRef){
+    if(SHARED){
       lastSyncedJSON = json;
-      sharedRef.set(json)
+      nhSave(DB)
         .then(()=>setStatus("Saved for everyone \u00b7 "+new Date().toLocaleTimeString()))
         .catch(()=>setStatus("Could not sync; use Export to keep changes"));
       try{ localStorage.setItem(STORE_KEY, json); }catch(e){}
